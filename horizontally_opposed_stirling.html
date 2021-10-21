@@ -1,0 +1,467 @@
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Boxer Stirling</title>
+<style type="text/css">
+canvas {
+	border: 1px black;
+	background-color: white;
+}
+</style>
+</head>
+<body onload="start();">
+<canvas id="pv_canvas" width="800" height="300">PV diagram</canvas>
+<canvas id="piston_canvas" width="800" height="300">Piston diagram</canvas>
+<script language="Javascript">
+// Shafts and pistons are on the X axis, so y=0;
+// Left shaft is on the origin, so x=0;
+
+// All units are SI base units or their derived units:
+// Kelvin
+// kilograms
+// meters
+// seconds
+// newtons
+// pascals
+// joules
+
+const rpm = 300.0;
+const omega = 2 * Math.PI * rpm / 60; // radians per second
+const delta_theta = Math.PI / 180; // radians
+const delta_time = delta_theta / omega;
+
+const right_shaft_x = 1.6;
+const right_theta_offset = 0.0;
+const bore_diameter_in_meters = 0.06;
+const left_stroke_in_meters = 0.2;
+const right_stroke_in_meters = 0.3;
+const left_rod_in_meters = 0.65;
+const right_rod_in_meters = 0.65;
+const left_crown_height_in_meters = 0.1;
+const right_crown_height_in_meters = 0.1;
+const left_sink_kelvin = 1000;
+const right_sink_kelvin = 295;
+var working_temperature_in_kelvin = 295;
+
+const min_piston_to_piston = Math.min(
+	right_shaft_x - left_crown_height_in_meters - right_crown_height_in_meters - left_rod_in_meters - right_rod_in_meters - left_stroke_in_meters/2 + right_stroke_in_meters/2,
+	right_shaft_x - left_crown_height_in_meters - right_crown_height_in_meters - left_rod_in_meters - right_rod_in_meters + left_stroke_in_meters/2 - right_stroke_in_meters/2);
+const max_piston_to_piston = Math.max(
+	right_shaft_x - left_crown_height_in_meters - right_crown_height_in_meters - left_rod_in_meters - right_rod_in_meters - left_stroke_in_meters/2 + right_stroke_in_meters/2,
+	right_shaft_x - left_crown_height_in_meters - right_crown_height_in_meters - left_rod_in_meters - right_rod_in_meters + left_stroke_in_meters/2 - right_stroke_in_meters/2);
+
+const left_sink_min_x = 0.65;
+const left_sink_max_x = 0.68;
+const right_sink_min_x = 0.95;
+const right_sink_max_x = 1;
+const left_heat_transfer_coefficient = 5.0;
+const right_heat_transfer_coefficient = 5.0;
+const r_air = 287.05; // J/kg*K
+
+
+const bore_area = 0.25 * Math.PI * bore_diameter_in_meters * bore_diameter_in_meters;
+const bore_circumference = Math.PI * bore_diameter_in_meters;
+
+var left_theta = 0.0;
+var right_theta = 0.0;
+var total_work_in_joules = 0.0;
+var total_heat_in_joules = 0.0;
+var working_volume_in_cubic_meters = 0.0;
+var working_pressure_in_pascals = 101325;
+var maximum_chart_pressure = 1200000;
+var minimum_chart_pressure = 55000;
+var left_crank_x = 0.0;
+var left_crank_y = 0.0;
+var right_crank_x = 10.0;
+var right_crank_y = 0.0;
+var left_wrist_pin_x = 0.0;
+var right_wrist_pin_x = 0.0;
+var left_piston_x = 0.0;
+var right_piston_x = 0.0;
+var piston_to_piston = 0.0;
+var pv_vertical_scale = 0.0;
+
+var maximum_chart_volume = max_piston_to_piston * bore_area;
+var minimum_chart_volume = min_piston_to_piston * bore_area;
+
+maximum_chart_volume += (maximum_chart_volume - minimum_chart_volume) * 0.1;
+minimum_chart_volume -= (maximum_chart_volume - minimum_chart_volume) * 0.1;
+
+
+function recalculate_hardware() {
+	left_crank_x = 0.5 * left_stroke_in_meters * Math.cos(left_theta);
+	left_crank_y = 0.5 * left_stroke_in_meters * Math.sin(left_theta);
+	right_crank_x = right_shaft_x + (0.5 * right_stroke_in_meters * Math.cos(right_theta));
+	right_crank_y = 0.5 * right_stroke_in_meters * Math.sin(right_theta);
+
+	left_wrist_pin_x = (left_stroke_in_meters * Math.cos(left_theta) / 2.0)
+		+ Math.sqrt(left_rod_in_meters * left_rod_in_meters
+					- (left_stroke_in_meters * Math.sin(left_theta) / 2.0)
+					* (left_stroke_in_meters * Math.sin(left_theta) / 2.0));
+
+	right_wrist_pin_x = right_shaft_x -
+		 ((0.5 * right_stroke_in_meters * Math.cos(right_theta + Math.PI))
+		+ Math.sqrt(right_rod_in_meters * right_rod_in_meters
+					- (right_stroke_in_meters * Math.sin(right_theta + Math.PI) / 2.0)
+					* (right_stroke_in_meters * Math.sin(right_theta + Math.PI) / 2.0)));
+
+	left_piston_x = left_wrist_pin_x + left_crown_height_in_meters;
+	right_piston_x = right_wrist_pin_x - right_crown_height_in_meters;
+
+	piston_to_piston = right_piston_x - left_piston_x;
+	working_volume_in_cubic_meters = piston_to_piston * bore_area;
+}
+recalculate_hardware();
+
+function rotate() {
+	left_theta += delta_theta;
+	right_theta = left_theta + right_theta_offset;
+}
+
+
+function interpolate(t1, t2, c1, c2, t) {
+	let slope = (c2 - c1) / (t2 - t1);
+	return slope * (t - t1) + c1;
+}
+
+function hsv2rgb(h,s,v) {
+	// input: h in [0,360] and s,v in [0,1] - output: r,g,b in [0,1]
+	// https://stackoverflow.com/questions/17242144/javascript-convert-hsb-hsv-color-to-rgb-accurately                            
+	let f= (n,k=(n+h/60)%6) => v - v*s*Math.max( Math.min(k,4-k,1), 0);     
+	return [f(5),f(3),f(1)];       
+}
+
+function get_color_for_temperature(T) {
+	let hue_red = 0.0;
+	let hue_blue = 240.0;
+	let hue = interpolate(left_sink_kelvin, right_sink_kelvin, hue_red, hue_blue, T);
+	let rgb = hsv2rgb(hue, 1, 0.8);
+	rgb[0] *= 255;
+	rgb[1] *= 255;
+	rgb[2] *= 255;
+	return rgb;
+}
+
+
+function get_cv_for_T(T) {
+	// return 0.726;
+	if(T < 250.0) { return 0.716; }
+	else if (T >=  250 && T <  300) { return interpolate( 250,  300, 0.716, 0.718, T); } 
+	else if (T >=  300 && T <  350) { return interpolate( 300,  350, 0.718, 0.721, T); } 
+	else if (T >=  350 && T <  400) { return interpolate( 350,  400, 0.721, 0.726, T); } 
+	else if (T >=  400 && T <  450) { return interpolate( 400,  450, 0.726, 0.733, T); } 
+	else if (T >=  450 && T <  500) { return interpolate( 450,  500, 0.733, 0.742, T); } 
+	else if (T >=  500 && T <  550) { return interpolate( 500,  550, 0.742, 0.753, T); } 
+	else if (T >=  550 && T <  600) { return interpolate( 550,  600, 0.753, 0.764, T); } 
+	else if (T >=  600 && T <  650) { return interpolate( 600,  650, 0.764, 0.776, T); } 
+	else if (T >=  650 && T <  700) { return interpolate( 650,  700, 0.776, 0.788, T); } 
+	else if (T >=  700 && T <  750) { return interpolate( 700,  750, 0.788, 0.800, T); } 
+	else if (T >=  750 && T <  800) { return interpolate( 750,  800, 0.800, 0.812, T); } 
+	else if (T >=  800 && T <  900) { return interpolate( 800,  900, 0.812, 0.834, T); } 
+	else if (T >=  900 && T < 1000) { return interpolate( 900, 1000, 0.834, 0.855, T); } 
+	else if (T >= 1000 && T < 1100) { return interpolate(1000, 1100, 0.855, 0.868, T); } 
+	else if (T >= 1100 && T < 1200) { return interpolate(1100, 1200, 0.868, 0.886, T); } 
+	else if (T >= 1200 && T < 1300) { return interpolate(1200, 1300, 0.886, 0.903, T); } 
+	else if (T >= 1300 && T < 1400) { return interpolate(1300, 1400, 0.903, 0.917, T); } 
+	else if (T >= 1400 && T < 1500) { return interpolate(1400, 1500, 0.917, 0.929, T); } 
+	else if (T >= 1500) { return 0.929; } 
+	return 0.0;
+}
+
+
+function get_cp_for_T(T) {
+	// return 1.013;
+	if(T < 250.0) { return 1.003; }
+	else if (T >=  250 && T <  300) { return interpolate( 250,  300, 1.003, 1.005, T); } 
+	else if (T >=  300 && T <  350) { return interpolate( 300,  350, 1.005, 1.008, T); } 
+	else if (T >=  350 && T <  400) { return interpolate( 350,  400, 1.008, 1.013, T); } 
+	else if (T >=  400 && T <  450) { return interpolate( 400,  450, 1.013, 1.020, T); } 
+	else if (T >=  450 && T <  500) { return interpolate( 450,  500, 1.020, 1.029, T); } 
+	else if (T >=  500 && T <  550) { return interpolate( 500,  550, 1.029, 1.040, T); } 
+	else if (T >=  550 && T <  600) { return interpolate( 550,  600, 1.040, 1.051, T); } 
+	else if (T >=  600 && T <  650) { return interpolate( 600,  650, 1.051, 1.063, T); } 
+	else if (T >=  650 && T <  700) { return interpolate( 650,  700, 1.063, 1.075, T); } 
+	else if (T >=  700 && T <  750) { return interpolate( 700,  750, 1.075, 1.087, T); } 
+	else if (T >=  750 && T <  800) { return interpolate( 750,  800, 1.087, 1.099, T); } 
+	else if (T >=  800 && T <  900) { return interpolate( 800,  900, 1.099, 1.121, T); } 
+	else if (T >=  900 && T < 1000) { return interpolate( 900, 1000, 1.121, 1.142, T); } 
+	else if (T >= 1000 && T < 1100) { return interpolate(1000, 1100, 1.142, 1.155, T); } 
+	else if (T >= 1100 && T < 1200) { return interpolate(1100, 1200, 1.155, 1.173, T); } 
+	else if (T >= 1200 && T < 1300) { return interpolate(1200, 1300, 1.173, 1.190, T); } 
+	else if (T >= 1300 && T < 1400) { return interpolate(1300, 1400, 1.190, 1.204, T); } 
+	else if (T >= 1400 && T < 1500) { return interpolate(1400, 1500, 1.204, 1.216, T); } 
+	else if (T >= 1500) { return 1.216; } 
+	return 0.0;
+}
+
+function get_k_for_T(T) {
+	return get_cp_for_T(T) / get_cv_for_T(T);
+}
+
+function increment_adiabatic_pT() {
+	let k = get_k_for_T(working_temperature_in_kelvin);
+
+	let pressure_ratio = Math.pow(old_volume, k)
+	                   / Math.pow(working_volume_in_cubic_meters, k);
+	let temperature_ratio = Math.pow(old_volume, k - 1)
+	                      / Math.pow(working_volume_in_cubic_meters, k - 1);
+	working_pressure_in_pascals = old_pressure * pressure_ratio;
+	working_temperature_in_kelvin = old_temperature * temperature_ratio;
+}
+
+function get_old_state() {
+	old_volume = working_volume_in_cubic_meters;
+	old_temperature = working_temperature_in_kelvin;
+	old_pressure = working_pressure_in_pascals;
+}
+
+function do_heat_transfer() {
+	let left_heat_transfer_min_x = Math.max(left_piston_x, left_sink_min_x);
+	let left_heat_transfer_max_x = Math.min(right_piston_x, left_sink_max_x);
+
+	let right_heat_transfer_min_x = Math.max(left_piston_x, right_sink_min_x);
+	let right_heat_transfer_max_x = Math.min(right_piston_x, right_sink_max_x);
+
+	let left_heat_transfer_length  = Math.max( left_heat_transfer_max_x -  left_heat_transfer_min_x, 0.0);
+	let right_heat_transfer_length = Math.max(right_heat_transfer_max_x - right_heat_transfer_min_x, 0.0);
+
+	let left_heat_transfer_area = left_heat_transfer_length * bore_circumference;
+	let right_heat_transfer_area = right_heat_transfer_length * bore_circumference;
+
+	let left_heat_transfer_power =
+		left_heat_transfer_coefficient
+		* left_heat_transfer_area
+		* (left_sink_kelvin - working_temperature_in_kelvin);
+
+	let right_heat_transfer_power =
+		right_heat_transfer_coefficient
+		* right_heat_transfer_area
+		* (right_sink_kelvin - working_temperature_in_kelvin);
+
+	let heat_transfer_energy =
+		(left_heat_transfer_power + right_heat_transfer_power) * delta_time;
+
+
+	let mass =
+		working_pressure_in_pascals
+		* working_volume_in_cubic_meters
+		/ (r_air * working_temperature_in_kelvin);
+
+	let delta_temperature =
+			heat_transfer_energy
+			/ (mass * get_cv_for_T(working_temperature_in_kelvin));
+
+	let pressure_factor = (working_temperature_in_kelvin + delta_temperature) / working_temperature_in_kelvin;
+
+	working_temperature_in_kelvin += delta_temperature;
+	working_pressure_in_pascals *= pressure_factor;
+
+	// console.log("mass (should be constant!) = " + mass);
+
+	total_heat_in_joules += heat_transfer_energy;
+}
+
+function do_work() {
+	let average_p = (working_pressure_in_pascals + old_pressure) / 2;
+	let delta_v = working_volume_in_cubic_meters - old_volume;
+	let delta_work = average_p * delta_v;
+	total_work_in_joules += delta_work;
+}
+
+function collect_extrema_pv() {
+	if (working_pressure_in_pascals > maximum_chart_pressure) {
+		maximum_chart_pressure = working_pressure_in_pascals;
+	}
+	if (working_pressure_in_pascals < minimum_chart_pressure) {
+		minimum_chart_pressure = working_pressure_in_pascals;
+	}
+	if (working_temperature_in_kelvin > maximum_chart_volume) {
+		maximum_chart_volume = working_volume_in_cubic_meters;
+	}
+	if (working_temperature_in_kelvin < minimum_chart_volume) {
+		minimum_chart_volume = working_volume_in_cubic_meters;
+	}
+	// console.log("maximum_chart_pressure, minimum_chart_pressure, maximum_chart_volume, minimum_chart_volume = "
+	// 	+ maximum_chart_pressure + ", "
+	// 	+ minimum_chart_pressure + ", "
+	// 	+ maximum_chart_volume + ", "
+	// 	+ minimum_chart_volume);
+}
+function iterate_physics() {
+	get_old_state();
+	rotate();
+	recalculate_hardware();
+	increment_adiabatic_pT();
+	do_heat_transfer();
+	do_work();
+	// collect_extrema_pv();
+}
+
+function iterate() {
+	iterate_physics();
+	draw_piston();
+	draw_pv_diagram();
+}
+
+function start() {
+	setInterval(iterate, delta_time * 1000);
+}
+
+var piston_canvas = document.getElementById('piston_canvas');
+var piston_ctx = piston_canvas.getContext('2d');
+
+var pv_canvas = document.getElementById('pv_canvas');
+var pv_ctx = pv_canvas.getContext('2d');
+
+function resize_piston_context() {
+	let leftX = -left_stroke_in_meters/2;
+	let topY =  Math.max(left_stroke_in_meters, right_stroke_in_meters) / 2;
+	let rightX = right_shaft_x + right_stroke_in_meters/2;
+	let bottomY = -Math.max(left_stroke_in_meters, right_stroke_in_meters) / 2;
+
+	piston_ctx.resetTransform();
+	let horizontal_scaling = (piston_ctx.canvas.clientWidth) / (rightX - leftX);
+	let vertical_scaling = (piston_ctx.canvas.clientHeight) / (bottomY - topY);
+	let min_scaling = Math.min(Math.abs(horizontal_scaling), Math.abs(vertical_scaling));
+	let horizontal_translation = -leftX * Math.abs(horizontal_scaling / min_scaling);
+	let vertical_translation = -topY * Math.abs(vertical_scaling / min_scaling);
+	horizontal_scaling = Math.sign(horizontal_scaling) * min_scaling;
+	vertical_scaling = Math.sign(vertical_scaling) * min_scaling;
+	piston_ctx.scale(horizontal_scaling, vertical_scaling);
+	piston_ctx.translate(horizontal_translation, vertical_translation);
+	piston_ctx.lineWidth = 2 / horizontal_scaling;
+}
+resize_piston_context();
+
+function resize_pv_context() {
+	pv_ctx.resetTransform();
+	let old_aspect_ratio = pv_ctx.canvas.clientWidth / pv_ctx.canvas.clientHeight;
+	let new_aspect_ratio = (maximum_chart_volume - minimum_chart_volume) / (maximum_chart_pressure - minimum_chart_pressure);
+	pv_vertical_scale = old_aspect_ratio / new_aspect_ratio;
+
+	let leftX = minimum_chart_volume;
+	let topY =  maximum_chart_pressure / pv_vertical_scale;
+	let rightX = maximum_chart_volume;
+	let bottomY = minimum_chart_pressure / pv_vertical_scale;
+
+	let horizontal_scaling = (pv_ctx.canvas.clientWidth) / (rightX - leftX);
+	let vertical_scaling = (pv_ctx.canvas.clientHeight) / (bottomY - topY);
+	let horizontal_translation = -leftX;
+	let vertical_translation = -topY;
+	pv_ctx.scale(horizontal_scaling, vertical_scaling);
+	pv_ctx.translate(horizontal_translation, vertical_translation);
+	pv_ctx.lineWidth = 2 / horizontal_scaling;
+}
+resize_pv_context();
+
+
+function draw_piston() {
+	let leftX = -left_stroke_in_meters/2;
+	let topY =  Math.max(left_stroke_in_meters, right_stroke_in_meters) / 2;
+	let rightX = right_shaft_x + right_stroke_in_meters/2;
+	let bottomY = -Math.max(left_stroke_in_meters, right_stroke_in_meters) / 2;
+
+	piston_ctx.fillStyle = window.getComputedStyle(piston_canvas).backgroundColor;
+	piston_ctx.fillRect(leftX, bottomY, (rightX - leftX), (topY - bottomY));
+
+	let bore_left = -left_stroke_in_meters/2 + left_rod_in_meters;
+	let bore_right = right_shaft_x + right_stroke_in_meters/2 - right_rod_in_meters;
+
+	// left sink
+	piston_ctx.fillStyle = 'rgb(240, 0, 0)';
+	piston_ctx.strokeStyle = 'rgb(240, 0, 0)';
+	piston_ctx.beginPath();
+	let left_sink_width = left_sink_max_x - left_sink_min_x;
+	piston_ctx.fillRect(left_sink_min_x, -bore_diameter_in_meters, left_sink_width, 2 * bore_diameter_in_meters);
+	piston_ctx.stroke();
+
+	// right sink
+	piston_ctx.fillStyle = 'rgb(0, 0, 240)';
+	piston_ctx.strokeStyle = 'rgb(0, 0, 240)';
+	piston_ctx.beginPath();
+	let right_sink_width = right_sink_max_x - right_sink_min_x;
+	piston_ctx.fillRect(right_sink_min_x, -bore_diameter_in_meters, right_sink_width, 2 * bore_diameter_in_meters);
+	piston_ctx.stroke();
+
+	// bore
+	piston_ctx.strokeStyle = 'rgb(0, 0, 0)';
+	piston_ctx.beginPath();
+	piston_ctx.moveTo(bore_left, bore_diameter_in_meters/2);
+	piston_ctx.lineTo(bore_right, bore_diameter_in_meters/2);
+	piston_ctx.stroke();
+
+	piston_ctx.strokeStyle = 'rgb(0, 0, 0)';
+	piston_ctx.beginPath();
+	piston_ctx.moveTo(-left_stroke_in_meters/2 + left_rod_in_meters, -bore_diameter_in_meters/2);
+	piston_ctx.lineTo(right_shaft_x + right_stroke_in_meters/2 - right_rod_in_meters, -bore_diameter_in_meters/2);
+	piston_ctx.stroke();
+
+	// left crank path
+	piston_ctx.strokeStyle = 'rgb(200, 200, 200)';
+	piston_ctx.beginPath();
+	piston_ctx.moveTo(left_stroke_in_meters/2, 0.0);
+	piston_ctx.arc(0.0, 0.0, left_stroke_in_meters/2, 0, Math.PI * 2);
+	piston_ctx.stroke();
+
+	// right crank path
+	piston_ctx.strokeStyle = 'rgb(200, 200, 200)';
+	piston_ctx.beginPath();
+	piston_ctx.moveTo(right_shaft_x + right_stroke_in_meters/2.0, 0.0);
+	piston_ctx.arc(right_shaft_x, 0.0, right_stroke_in_meters/2, 0, Math.PI * 2);
+	piston_ctx.stroke();
+
+	// left connecting rod
+	piston_ctx.strokeStyle = 'rgb(200, 0, 0)';
+	piston_ctx.beginPath();
+	piston_ctx.moveTo(left_crank_x, left_crank_y);
+	piston_ctx.lineTo(left_wrist_pin_x, 0);
+	piston_ctx.stroke();
+
+	// right connecting rod
+	piston_ctx.strokeStyle = 'rgb(200, 0, 0)';
+	piston_ctx.beginPath();
+	piston_ctx.moveTo(right_crank_x, right_crank_y);
+	piston_ctx.lineTo(right_wrist_pin_x, 0);
+	piston_ctx.stroke();
+
+	// left crank
+	piston_ctx.strokeStyle = 'rgb(10, 10, 10)';
+	piston_ctx.beginPath();
+	piston_ctx.moveTo(left_crank_x, left_crank_y);
+	piston_ctx.lineTo(0.0, 0.0);
+	piston_ctx.stroke();
+
+	// right crank
+	piston_ctx.strokeStyle = 'rgb(10, 10, 10)';
+	piston_ctx.beginPath();
+	piston_ctx.moveTo(right_crank_x, right_crank_y);
+	piston_ctx.lineTo(right_shaft_x, 0.0);
+	piston_ctx.stroke();
+
+	// left piston
+	piston_ctx.fillStyle = 'rgb(128, 128, 128)';
+	piston_ctx.fillRect(left_wrist_pin_x, -bore_diameter_in_meters/2, (left_piston_x - left_wrist_pin_x), bore_diameter_in_meters);
+
+	// right piston
+	piston_ctx.fillStyle = 'rgb(128, 128, 128)';
+	piston_ctx.fillRect(right_piston_x, -bore_diameter_in_meters/2, (right_wrist_pin_x - right_piston_x), bore_diameter_in_meters);
+}
+
+function draw_pv_diagram() {
+	pv_ctx.fillStyle = 'rgb(128, 128, 128)';
+	pv_ctx.beginPath();
+	let rgb = get_color_for_temperature(working_temperature_in_kelvin);;
+	let color_string = "rgba(" + rgb[0] + "," + rgb[1] + "," + rgb[2] + ", 0.05)";
+	// console.log("color_string = " + color_string);
+	pv_ctx.strokeStyle = color_string;
+	pv_ctx.moveTo(old_volume, old_pressure / pv_vertical_scale);
+	pv_ctx.lineTo(working_volume_in_cubic_meters, working_pressure_in_pascals / pv_vertical_scale);
+	pv_ctx.stroke();
+}
+
+
+
+</script>
+
+</body>
+</html>
